@@ -90,13 +90,21 @@ Return a single JSON object with exactly these keys:
   very often print e.g. "LOBBY 850 SF" right under/beside the room label) -- {"category": "room_area", \
   "text": "LOBBY: 850 SF"}. This is the single most reliable source for an area question and should be captured \
   whenever visible, so a later question doesn't need to fall back to fragile on-demand polygon geometry.
-- "instance_targets": for each schedule whose marks are placed as tags on a plan view, one entry describing how to \
-  find every PLACED INSTANCE of that mark (not the schedule row itself): \
-  {"sheet_index" (the sheet showing the PLAN with the tags, not necessarily the schedule's own sheet), \
-   "pattern" (a Python regex matching the tag text, e.g. "F\\\\d{2}" for F10/F12/F14, "D0\\\\d" for D01-D06), \
-   "exclude_bboxes" (list of [x0,y0,x1,y1] regions on that sheet to exclude — the schedule table itself, \
-   the legend, and the title block, so a mark listed in the schedule isn't miscounted as a placed instance; \
-   use the bbox extent covering all text blocks that belong to that schedule/legend/title block on this sheet)}.
+- "instance_targets": one entry per COUNTABLE, REPEATED thing that appears as text directly placed on a plan \
+  view (not description prose) -- so a later question like "how many X" or "where are the X" can be answered \
+  exactly. Two cases, both go in this same list:
+  (a) A schedule's marks placed as tags on a plan (e.g. F10/F12/F14 footing tags, D01-D06 door tags) -- the \
+      classic case, `pattern` matches the mark exactly as it appears on the plan.
+  (b) NO schedule at all, but a repeated room/space TYPE label is written directly on a plan (very common on \
+      residential/small sets -- e.g. "BEDROOM 1", "BEDROOM 2", "BATHROOM", "BATH 2") -- propose a pattern that \
+      matches the type, e.g. "BEDROOM\\\\s*\\\\d*" or "BATHROOM\\\\s*\\\\d*", so instances of that room type get \
+      counted and located even without any schedule backing them. Do this for any plan sheet with 2+ instances \
+      of the same room/space type.
+  In both cases: {"sheet_index" (the sheet showing the PLAN with the tags/labels), "pattern" (a Python regex), \
+  "exclude_bboxes" (list of [x0,y0,x1,y1] regions on that sheet to exclude — a schedule table, legend, or title \
+  block that would otherwise double-count a definition as a placed instance; for case (b) with no schedule this \
+  is usually just the title block, or can be empty)}. Never skip proposing an instance_target just because \
+  there's no formal schedule -- repeated labels directly on a plan are instances too.
 - "markdown": one entry per sheet: {"sheet_index", "content"} — a concise markdown summary of that sheet: \
   title, discipline, scale, a prose description of what's on it, and its schedules/notes rendered as tables. \
   This is for retrieval, not for counting. On a PLAN sheet, if any room/space name labels are visible (e.g. \
@@ -257,6 +265,10 @@ def ingest_pdf(doc_id: str, pdf_path: Path) -> dict:
 
     # Per-sheet markdown -> embed -> store in the `chunks` table (simple in-SQLite vector store).
     conn = db.get_conn(doc_id)
+    # build_db.py skips creating a table when its list is empty (e.g. no schedules on this
+    # set) -- make sure sheets/schedules/instances/notes always exist so query_sql gets an
+    # empty result instead of a "no such table" error.
+    db.ensure_core_tables(conn)
     db.ensure_chunks_table(conn)
     markdown_dir = d / "markdown"
     markdown_dir.mkdir(exist_ok=True)

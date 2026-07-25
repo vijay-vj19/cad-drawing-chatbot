@@ -12,6 +12,24 @@ def get_conn(doc_id: str) -> sqlite3.Connection:
     return conn
 
 
+CORE_TABLE_COLUMNS = {
+    "sheets": ["number", "title", "discipline", "scale", "source_sheet"],
+    "schedules": ["type", "mark", "properties", "source_sheet", "reliability"],
+    "instances": ["tag", "x", "y", "source_sheet", "reliability"],
+    "notes": ["category", "text", "source_sheet", "reliability"],
+}
+
+
+def ensure_core_tables(conn: sqlite3.Connection) -> None:
+    """build_db.py only creates a table when its list is non-empty (e.g. a document with
+    no schedules or no placed instances), which left `query_sql` failing with 'no such
+    table' instead of just returning zero rows. Make sure all four tables always exist."""
+    for table, columns in CORE_TABLE_COLUMNS.items():
+        cols_sql = ",".join(f'"{c}" TEXT' for c in columns)
+        conn.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({cols_sql})')
+    conn.commit()
+
+
 def ensure_chunks_table(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
