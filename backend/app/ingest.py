@@ -72,51 +72,74 @@ def run_build_db(structured_path: Path, sqlite_out: Path) -> None:
 # Step 3 — one GPT-4o call: classify sheets, parse schedules/notes, propose
 # instance tag patterns + exclusion boxes, write per-sheet markdown.
 # ---------------------------------------------------------------------------
-EXTRACTION_SYSTEM_PROMPT = """You are extracting structured data from a construction drawing set for a database. \
-You will be given, for every sheet, its raw vector-extracted text blocks (each with exact bbox coordinates in PDF points) \
-and any title-block candidates already detected positionally.
+EXTRACTION_SYSTEM_PROMPT = """You are extracting structured data from a set of CAD/construction drawings for a \
+database. This could be ANY type of drawing set -- a house, an apartment building, a shop fit-out, a multi- \
+storey/skyscraper tower, a road/civil plan, an electrical/mechanical/plumbing layout, or anything else. Do not \
+assume a residential or commercial building; read what's actually on the sheet and adapt. You will be given, \
+for every sheet, its raw vector-extracted text blocks (each with exact bbox coordinates in PDF points) and any \
+title-block candidates already detected positionally.
+
+The goal is to capture EVERY distinct, nameable thing on each sheet as structured, queryable data -- rooms/ \
+spaces, doors, windows, staircases, structural elements (footings, columns, beams, slabs), fixtures/equipment, \
+civil elements (manholes, catch basins, curbs, light poles, road segments), electrical/mechanical components, \
+or anything else that appears as a distinct labeled/tagged item. Nothing discipline-specific is hardcoded here \
+-- infer the vocabulary from what the drawing actually shows.
 
 Return a single JSON object with exactly these keys:
-- "sheets": one entry per sheet: {"sheet_index", "number", "title", "discipline", "scale"} \
-  (number/title/scale read from the title block; discipline inferred, e.g. "structural", "architectural").
-- "schedules": one row per schedule entry found (e.g. a footing schedule, door schedule, window schedule, \
-  room/space/finish schedule). Parse schedule tables COMPLETELY, one row per type/mark: \
-  {"sheet_index", "type", "mark", "properties", "reliability": "HIGH"}. \
-  "properties" is a short human-readable string of the row's other columns (size, rating, material, AREA, etc). \
-  If a room/space schedule lists an area (SF, SQ FT, m2), put it in "properties" verbatim (e.g. "AREA: 850 SF") \
-  -- this is a common, exact, HIGH-reliability way area questions get answered without any geometry math.
-- "notes": general/sheet notes blocks: {"sheet_index", "category", "text", "reliability": "HIGH"}. Also include, \
-  as its own row here, any room/space area printed directly on a PLAN next to a room name (architectural plans \
-  very often print e.g. "LOBBY 850 SF" right under/beside the room label) -- {"category": "room_area", \
-  "text": "LOBBY: 850 SF"}. This is the single most reliable source for an area question and should be captured \
-  whenever visible, so a later question doesn't need to fall back to fragile on-demand polygon geometry.
-- "instance_targets": one entry per COUNTABLE, REPEATED thing that appears as text directly placed on a plan \
-  view (not description prose) -- so a later question like "how many X" or "where are the X" can be answered \
-  exactly. Two cases, both go in this same list:
-  (a) A schedule's marks placed as tags on a plan (e.g. F10/F12/F14 footing tags, D01-D06 door tags) -- the \
-      classic case, `pattern` matches the mark exactly as it appears on the plan.
-  (b) NO schedule at all, but a repeated room/space TYPE label is written directly on a plan (very common on \
-      residential/small sets -- e.g. "BEDROOM 1", "BEDROOM 2", "BATHROOM", "BATH 2") -- propose a pattern that \
-      matches the type, e.g. "BEDROOM\\\\s*\\\\d*" or "BATHROOM\\\\s*\\\\d*", so instances of that room type get \
-      counted and located even without any schedule backing them. Do this for any plan sheet with 2+ instances \
-      of the same room/space type.
-  In both cases: {"sheet_index" (the sheet showing the PLAN with the tags/labels), "pattern" (a Python regex), \
-  "exclude_bboxes" (list of [x0,y0,x1,y1] regions on that sheet to exclude — a schedule table, legend, or title \
-  block that would otherwise double-count a definition as a placed instance; for case (b) with no schedule this \
-  is usually just the title block, or can be empty)}. Never skip proposing an instance_target just because \
-  there's no formal schedule -- repeated labels directly on a plan are instances too.
-- "markdown": one entry per sheet: {"sheet_index", "content"} — a concise markdown summary of that sheet: \
-  title, discipline, scale, a prose description of what's on it, and its schedules/notes rendered as tables. \
-  This is for retrieval, not for counting. On a PLAN sheet, if any room/space name labels are visible (e.g. \
-  "LOBBY", "MECHANICAL 105", "OFFICE"), end the markdown with a "## Coordinate hints" section listing each one \
-  with its approximate bbox from the sheet's text blocks, e.g. "- LOBBY: near [120, 340, 180, 355]", and its \
-  printed area if one is shown nearby, e.g. "- LOBBY: near [120, 340, 180, 355], AREA: 850 SF". This is what \
-  lets a later question like "square footage of the lobby" be answered by locating the name first (or reading \
-  the area straight off, if already printed), rather than scanning the whole sheet blind. Omit the section if \
-  the sheet has no such labels.
 
-Never invent a value. Store counts/marks as they literally appear. If a sheet has no schedules or no taggable \
-plan, omit it from the relevant list. Output strictly valid JSON, no commentary."""
+- "sheets": one entry per sheet: {"sheet_index", "number", "title", "discipline", "scale"} (read number/title/ \
+  scale from the title block; infer discipline from content, e.g. "architectural", "structural", "civil", \
+  "electrical", "mechanical", "plumbing").
+
+- "schedules": one row per schedule TABLE entry of any kind (footing schedule, door/window schedule, room/ \
+  space/finish schedule, fixture schedule, luminaire schedule, pipe/duct schedule, equipment schedule, manhole/ \
+  structure schedule -- whatever tabular catalogue exists on the set). Parse every schedule table COMPLETELY, \
+  one row per type/mark: {"sheet_index", "type", "mark", "properties", "reliability": "HIGH"}. "properties" is \
+  a short human-readable string of that row's other columns -- size, rating, material, area, capacity, invert \
+  level, whatever is listed. If a dimension, area, or level value is in the row (SF, m2, mm, ft-in, RL=, IL=, \
+  CL=), keep it verbatim in "properties" -- exact printed numbers here are the best possible answer to a later \
+  question and avoid any need for geometry math.
+
+- "notes": general/sheet notes blocks: {"sheet_index", "category", "text", "reliability": "HIGH"}. ALSO include, \
+  as its own row here, ANY dimension, size, area, level, or rating value printed directly next to a named/ \
+  tagged element on a PLAN, SECTION, or ELEVATION view (not in a schedule) -- this is extremely common and is \
+  the single most reliable source for a later "what's the X of Y" question. Examples, follow this pattern for \
+  whatever the drawing actually shows: {"category": "area", "text": "LOBBY: 850 SF"}, {"category": "dimension", \
+  "text": "PATIO: 12'-0\\" x 10'-0\\""}, {"category": "dimension", "text": "DOOR D01: 3'-0\\" WIDE"}, \
+  {"category": "level", "text": "MH3: IL=45.20"}. Capture every one you can find -- do not skip these because \
+  they seem minor; they are exactly what "dimension of X" / "how big is Y" questions need.
+
+- "instance_targets": one entry per COUNTABLE, REPEATED thing that appears as text/tag directly placed on a \
+  PLAN view (not a schedule row, not description prose) -- so "how many X" / "where are the X" can be answered \
+  exactly, for absolutely any category of tagged or labeled element. Cover BOTH:
+  (a) A schedule's marks placed as tags on a plan (e.g. F10/F12/F14 footings, D01-D06 doors, MH1-MH5 manholes, \
+      C1/C2 columns) -- `pattern` matches the mark exactly as printed on the plan.
+  (b) No schedule at all, but a repeated TYPE label is written directly on a plan (very common for rooms on \
+      residential/commercial sets -- "BEDROOM 1", "KITCHEN", "OFFICE 204" -- but apply the same idea to ANY \
+      discipline: repeated equipment labels, repeated structural callouts, repeated road-furniture labels, \
+      whatever repeats on this specific set) -- propose a pattern matching the type, e.g. "BEDROOM\\\\s*\\\\d*", \
+      so instances are counted/located even with nothing backing them in a schedule.
+  Propose an instance_target for EVERY distinct repeated tag/label you can identify on a plan sheet -- do not \
+  limit yourself to one or two obvious categories; a single sheet can have many (rooms AND doors AND windows \
+  AND structural marks, all as separate instance_targets). Each entry: {"sheet_index" (the sheet showing the \
+  PLAN with the tags/labels), "pattern" (a Python regex), "exclude_bboxes" (list of [x0,y0,x1,y1] regions on \
+  that sheet to exclude -- a schedule table, legend, or title block that would otherwise double-count a \
+  definition as a placed instance; empty list if there's nothing to exclude)}.
+
+- "markdown": one entry per sheet: {"sheet_index", "content"} -- a thorough markdown summary of that sheet: \
+  title, discipline, scale, a prose description of everything shown (not just a one-liner -- describe the \
+  layout, what's adjacent to what, any labeled elements, any callouts), and its schedules/notes rendered as \
+  tables. This is for retrieval, not for counting. End it with a "## Coordinate hints" section listing every \
+  named/tagged element visible on a plan (room, door, staircase, fixture, structural mark, civil structure -- \
+  anything with a label) with its approximate bbox and any printed value shown right next to it, e.g. \
+  "- LOBBY: near [120, 340, 180, 355], AREA: 850 SF", "- STAIR 1: near [400, 200, 440, 260]", "- D01: near \
+  [60, 500, 80, 520], WIDTH: 3'-0\\"". This is what lets later questions -- area, dimension, distance between \
+  two elements -- be answered by locating the element(s) first. Be exhaustive here; omit the section only if \
+  the sheet genuinely has no such labels (e.g. a pure notes/schedule sheet).
+
+Never invent a value -- everything above must be read directly from the given text. Store counts/marks/values \
+exactly as they literally appear on the sheet. If a sheet has no schedules, no taggable plan, or no notable \
+callouts, omit it from the relevant list rather than guessing. Output strictly valid JSON, no commentary."""
 
 
 def call_extraction_model(sheets_payload: list[dict]) -> dict:
