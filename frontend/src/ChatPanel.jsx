@@ -23,7 +23,7 @@ export default function ChatPanel({ docId }) {
 
     try {
       const data = await askQuestion(docId, question, history);
-      setMessages((m) => [...m, { role: "assistant", content: data.answer, toolCalls: data.tool_calls }]);
+      setMessages((m) => [...m, { role: "assistant", content: data.answer }]);
     } catch (err) {
       setMessages((m) => [...m, { role: "assistant", content: `Error: ${err.message}`, isError: true }]);
     } finally {
@@ -40,7 +40,6 @@ export default function ChatPanel({ docId }) {
         {messages.map((m, i) => (
           <div key={i} className={`message ${m.role}${m.isError ? " error" : ""}`}>
             <div className="bubble">{m.content}</div>
-            {m.toolCalls?.length > 0 && <div className="tool-badges">used: {m.toolCalls.join(", ")}</div>}
           </div>
         ))}
         {asking && <div className="message assistant"><div className="bubble">Thinking…</div></div>}

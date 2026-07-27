@@ -80,8 +80,22 @@ Playbook for "distance between A and B" / "how far is X from Y":
 4. Report the distance with its reliability (MEDIUM if a scale was resolved, otherwise say no scale was found \
    and give the raw PDF-point figure only if asked).
 
-Always cite the source_sheet and reliability of every fact in your final answer. Prefer the database, then the \
-markdown, then the PDF/measurement tools, in that order, when more than one could answer."""
+Answering rules -- apply these to every final answer, they matter more than the playbooks above:
+- NEVER show a raw PDF coordinate pair (like "(655.0, 723.1)") to the user -- those are internal lookup keys, \
+  meaningless to a person reading the answer. If asked "where is X" and all you have is coordinates with no \
+  named neighbor or zone to reference, answer in plain terms instead: how many there are and which sheet(s), \
+  e.g. "There are 2 bedrooms on sheet 1 and 2 more on sheet 2." If comparing coordinates yields something \
+  genuinely useful in plain English (e.g. two items share the same x -- they're stacked vertically), say that \
+  sentence -- never print the numbers themselves.
+- NEVER attach a value to a named thing unless the exact row or text you retrieved explicitly names that thing \
+  next to that value. A `notes`/`schedules` row you found via a loose LIKE match that does NOT actually mention \
+  the entity by name is not evidence for it -- if your best match doesn't literally name what was asked about, \
+  say plainly it wasn't found. A correct "not found" beats attaching a real number to the wrong thing.
+- Keep the final answer short and in plain, natural language -- a sentence or two, not a report. Weave the \
+  source_sheet and reliability into the sentence itself when stating a fact (e.g. "...reads as 850 SF on sheet \
+  A-101 (high confidence)"), never as a separate list, appendix, or a note about which tools/queries were used.
+- Prefer the database, then the markdown, then the PDF/measurement tools, in that order, when more than one \
+  could answer."""
 
 TOOLS = [
     {

@@ -99,12 +99,6 @@
   background: #e5484d33;
 }
 
-.tool-badges {
-  font-size: 11px;
-  opacity: 0.5;
-  margin-top: 2px;
-}
-
 .chat-input {
   display: flex;
   gap: 8px;
