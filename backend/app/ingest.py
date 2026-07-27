@@ -192,10 +192,14 @@ Return a single JSON object with exactly these keys:
   minor; they are exactly what "dimension of X" / "how big is Y" questions need.
   CRITICAL rule for rooms/spaces specifically: a room's "dimension" means its full extent -- either a \
   width x length pair (e.g. "12'-0\\" x 10'-0\\"") or an area (SF/m2/etc). A room is normally bounded by \
-  several separate dimension strings (one per wall), each showing only ONE edge's length. NEVER record just \
-  one of those edge lengths as if it were "the room's dimension" -- that misrepresents a partial measurement \
-  as the complete size. If you can identify a genuine width+length pair (or a printed area) for a room, record \
-  that as the dimension. If you can only see individual, unpaired edge lengths near a room, either skip them or \
+  several separate dimension strings (one per wall), each showing only ONE edge's length. ACTIVELY look for TWO \
+  perpendicular edge lengths for each room -- one running along a horizontal wall (width) and one along a \
+  vertical wall (length/depth) -- before concluding only one is available; they are often on two different \
+  sides of the room, so check all sides, not just the first number you notice. When you find both, combine them \
+  into one complete "W x L" dimension. NEVER record just one of those edge lengths as if it were "the room's \
+  dimension" -- that misrepresents a partial measurement as the complete size. If you can identify a genuine \
+  width+length pair (or a printed area) for a room, record that as the dimension. Only after actually checking \
+  all sides, if you can still only see individual, unpaired edge lengths near a room, either skip them or \
   record each explicitly as a labeled partial measurement, e.g. {"category": "dimension", "text": "BEDROOM 1 \
   (one wall only, full room dimensions not legible): 2.30 m"} -- never drop the "(one wall only...)" \
   qualifier. This distinction does not apply to inherently single-length things (a door width, a wall \
@@ -244,12 +248,15 @@ text blocks must be tagged "reliability": "MEDIUM", never "HIGH" -- it's a visua
 text. Never invent a digit or value you can't clearly read off the image; if a dimension is illegible, skip it \
 rather than guessing.
 
-A room/space is normally surrounded by SEVERAL separate dimension strings, one per wall/edge -- reading just \
-one of them off the image and reporting it as "the room's dimension" is a real, specific mistake: it presents \
-a partial measurement as the complete size. Only report a room's dimension when you can actually see a \
-complete width+length pair (or a printed area) for it. If you can only make out individual unpaired edge \
-lengths, either skip them or label each one explicitly as partial per the "notes" rule above -- never state a \
-single edge length as if it answers "what are the dimensions of this room."
+A room/space is normally surrounded by SEVERAL separate dimension strings, one per wall/edge. Before settling \
+for a single number, actively scan ALL sides of each room in the image for a horizontal edge length AND a \
+vertical edge length -- they are usually on two different walls, not right next to each other, so look around \
+the whole room outline, not just wherever your eye lands first. When you find both, report the complete "W x \
+L" dimension. Reading just one edge off the image and reporting it as "the room's dimension" is a real, \
+specific mistake: it presents a partial measurement as the complete size. Only after genuinely checking all \
+sides, if you can only make out one unpaired edge length, either skip it or label it explicitly as partial per \
+the "notes" rule above -- never state a single edge length as if it answers "what are the dimensions of this \
+room."
 
 Concrete example of what NOT to do: do not write {"category": "area", "text": "KITCHENETTE: 2.30 m", \
 "reliability": "HIGH"} -- "2.30 m" is a bare length (wrong unit for an "area" category, and it's a visual read \

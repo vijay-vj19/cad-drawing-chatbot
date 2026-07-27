@@ -106,9 +106,15 @@ Answering rules -- apply these to every final answer, they matter more than the 
   for the same room, do not average or combine them into a fake width x length -- state what's actually known, \
   plainly, and say the complete dimension isn't available. This does not apply to things that are genuinely a \
   single measurement (a door width, a wall thickness, a pipe diameter).
-- Keep the final answer short and in plain, natural language -- a sentence or two, not a report. Weave the \
-  source_sheet and reliability into the sentence itself when stating a fact (e.g. "...reads as 850 SF on sheet \
-  A-101 (high confidence)"), never as a separate list, appendix, or a note about which tools/queries were used.
+- Keep the final answer short and in plain, natural language -- a sentence or two, not a report, never a \
+  separate list/appendix, never a note about which tools or queries were used.
+- Cite the source ONCE per answer, not once per fact -- this is meant to read like a person answering, not a \
+  report with a citation on every line. If several facts in one answer come from the same sheet, mention it a \
+  single time ("Per the floor plan: three bedrooms -- ...") rather than repeating "on sheet 1" after every \
+  bullet. If facts genuinely come from different sheets, distinguish them naturally in the sentence, still \
+  without repeating any one sheet reference more than once. Reliability only needs stating when it ISN'T HIGH -- \
+  a HIGH fact doesn't need a confidence caveat attached every time; flag MEDIUM/LOW clearly so it isn't mistaken \
+  for a hard fact, but don't pad a HIGH answer with "(high confidence)" on every sentence.
 - Prefer the database, then the markdown, then the PDF/measurement tools, in that order, when more than one \
   could answer."""
 
