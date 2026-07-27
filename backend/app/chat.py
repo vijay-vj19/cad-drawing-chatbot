@@ -99,6 +99,13 @@ Answering rules -- apply these to every final answer, they matter more than the 
   next to that value. A `notes`/`schedules` row you found via a loose LIKE match that does NOT actually mention \
   the entity by name is not evidence for it -- if your best match doesn't literally name what was asked about, \
   say plainly it wasn't found. A correct "not found" beats attaching a real number to the wrong thing.
+- NEVER state a single length as "the dimensions" of a room/space -- a room's dimension means a width x length \
+  pair or an area, not one wall's length. A `notes` row already labeled "(one wall only...)" or similar IS a \
+  partial measurement -- report it as exactly that ("one wall of Bedroom 1 measures 2.30 m; the full room \
+  dimensions aren't shown"), never phrase it as "Bedroom 1 measures 2.30 m." If several such partial rows exist \
+  for the same room, do not average or combine them into a fake width x length -- state what's actually known, \
+  plainly, and say the complete dimension isn't available. This does not apply to things that are genuinely a \
+  single measurement (a door width, a wall thickness, a pipe diameter).
 - Keep the final answer short and in plain, natural language -- a sentence or two, not a report. Weave the \
   source_sheet and reliability into the sentence itself when stating a fact (e.g. "...reads as 850 SF on sheet \
   A-101 (high confidence)"), never as a separate list, appendix, or a note about which tools/queries were used.
@@ -360,7 +367,12 @@ def _view_sheet_image(sheet_images: dict, args: dict) -> dict:
                 "content": (
                     "You are reading one construction drawing sheet image to answer one specific question. "
                     "Only state what you can actually see; if the answer isn't legible or isn't shown on this "
-                    "sheet, say so plainly rather than guessing. Be precise and concise."
+                    "sheet, say so plainly rather than guessing. Be precise and concise. If asked for a room's "
+                    "dimensions: a room is usually bounded by several separate dimension strings, one per wall "
+                    "-- only state a room's dimensions if you can see a complete width x length pair (or a "
+                    "printed area); if you can only make out one wall's length, say exactly that ('one wall "
+                    "measures X, the full dimensions aren't legible'), never state a single length as if it "
+                    "were the room's complete size. Never show raw pixel/coordinate numbers in your answer."
                 ),
             },
             {
@@ -378,6 +390,31 @@ def _view_sheet_image(sheet_images: dict, args: dict) -> dict:
         "reliability": "MEDIUM",
         "note": "live visual read of the rendered sheet image -- not pixel-precise, verify before stating as fact",
     }
+
+
+# Deterministic safety net for the "never show raw coordinates" rule -- prompting alone
+# isn't fully reliable once the conversation is full of tool results that genuinely
+# contain coordinate pairs, so detect a slip and have the model rewrite rather than just
+# trusting instruction-following on the final answer.
+COORD_PATTERN = re.compile(
+    r"[\[\(]\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?)?\s*[\]\)]"
+)
+
+
+def _rewrite_without_coordinates(messages: list[dict], flawed_answer: str) -> str:
+    rewrite_messages = messages + [
+        {"role": "assistant", "content": flawed_answer},
+        {
+            "role": "user",
+            "content": (
+                "Rewrite your last answer without any raw coordinate numbers or bracket/paren coordinate "
+                "pairs like [120, 340, 180, 355] or (655.0, 723.1) -- describe locations in plain words "
+                "instead (sheet number, room name, relative position). Keep everything else the same."
+            ),
+        },
+    ]
+    response = ingest.client.chat.completions.create(model=config.CHAT_MODEL, messages=rewrite_messages)
+    return response.choices[0].message.content or flawed_answer
 
 
 def _dispatch_tool(conn, sheet_files: dict, sheet_images: dict, name: str, args: dict) -> dict:
@@ -427,7 +464,10 @@ def answer_question(doc_id: str, question: str, history: list[dict] | None = Non
             msg = response.choices[0].message
 
             if not msg.tool_calls:
-                return {"answer": msg.content or "", "tool_calls": tool_calls_made}
+                answer = msg.content or ""
+                if COORD_PATTERN.search(answer):
+                    answer = _rewrite_without_coordinates(messages, answer)
+                return {"answer": answer, "tool_calls": tool_calls_made}
 
             messages.append(msg.model_dump(exclude_unset=True))
             for tc in msg.tool_calls:

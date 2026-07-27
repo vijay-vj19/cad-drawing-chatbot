@@ -174,6 +174,16 @@ Return a single JSON object with exactly these keys:
   "PATIO: 12'-0\\" x 10'-0\\""}, {"category": "dimension", "text": "DOOR D01: 3'-0\\" WIDE"}, {"category": \
   "level", "text": "MH3: IL=45.20"}. Capture every one you can find -- do not skip these because they seem \
   minor; they are exactly what "dimension of X" / "how big is Y" questions need.
+  CRITICAL rule for rooms/spaces specifically: a room's "dimension" means its full extent -- either a \
+  width x length pair (e.g. "12'-0\\" x 10'-0\\"") or an area (SF/m2/etc). A room is normally bounded by \
+  several separate dimension strings (one per wall), each showing only ONE edge's length. NEVER record just \
+  one of those edge lengths as if it were "the room's dimension" -- that misrepresents a partial measurement \
+  as the complete size. If you can identify a genuine width+length pair (or a printed area) for a room, record \
+  that as the dimension. If you can only see individual, unpaired edge lengths near a room, either skip them or \
+  record each explicitly as a labeled partial measurement, e.g. {"category": "dimension", "text": "BEDROOM 1 \
+  (one wall only, full room dimensions not legible): 2.30 m"} -- never drop the "(one wall only...)" \
+  qualifier. This distinction does not apply to inherently single-length things (a door width, a wall \
+  thickness, a pipe diameter) -- those are correctly captured as one number.
 
 - "instance_targets": one entry per COUNTABLE, REPEATED thing that appears as text/tag directly placed on this \
   sheet if it's a PLAN view (not a schedule row, not description prose) -- so "how many X" / "where are the X" \
@@ -216,7 +226,14 @@ and spatial layout/adjacency. Read the image carefully for any dimension, size, 
 alone wouldn't reveal. IMPORTANT: any value you read from the image that is NOT also confirmed in the given \
 text blocks must be tagged "reliability": "MEDIUM", never "HIGH" -- it's a visual read, not exact extracted \
 text. Never invent a digit or value you can't clearly read off the image; if a dimension is illegible, skip it \
-rather than guessing."""
+rather than guessing.
+
+A room/space is normally surrounded by SEVERAL separate dimension strings, one per wall/edge -- reading just \
+one of them off the image and reporting it as "the room's dimension" is a real, specific mistake: it presents \
+a partial measurement as the complete size. Only report a room's dimension when you can actually see a \
+complete width+length pair (or a printed area) for it. If you can only make out individual unpaired edge \
+lengths, either skip them or label each one explicitly as partial per the "notes" rule above -- never state a \
+single edge length as if it answers "what are the dimensions of this room.\""""
 
 
 def call_sheet_extraction(sheet_payload: dict, route: str, image_path: str | None) -> dict:
