@@ -44,6 +44,11 @@ export default function UploadPanel({ onUploaded }) {
               <> {summary.provenance_corrections} provenance correction{summary.provenance_corrections === 1 ? "" : "s"} applied.</>
             )}
           </p>
+          {summary.sheets_failed > 0 && (
+            <p className="error">
+              {summary.sheets_failed} sheet{summary.sheets_failed === 1 ? "" : "s"} failed to process and may be missing data — try re-uploading.
+            </p>
+          )}
           <ul>
             {summary.sheets.map((s) => (
               <li key={s.number}>

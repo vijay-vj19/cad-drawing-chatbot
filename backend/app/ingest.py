@@ -1,7 +1,9 @@
 import base64
 import json
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -86,8 +88,18 @@ containing "PLAN" is usually general_arrangement, "ELEVATION" -> elevation, "SEC
 title is ambiguous or missing. This works for any drawing discipline -- architectural, structural, civil, \
 electrical, mechanical, plumbing.
 
+ALSO decide, for each sheet, whether it's a DUPLICATE VIEW of a plan already shown on an earlier sheet -- e.g. \
+an "ARCHITECTURAL PLAN" and a "DIMENSIONED PLAN" of the same level are usually the SAME rooms shown twice (once \
+plain, once with dimension strings added), and a "FOUNDATION PLAN" and a "FOOTING PLAN" of the same level can \
+be the same thing too. If a sheet shows the same physical layout as an earlier sheet (same level/area, just a \
+different annotation focus), set "duplicate_of" to that earlier sheet's sheet_index; otherwise null. This \
+matters because counting room/tag instances on BOTH would double-count the same physical rooms -- getting this \
+right is important, but when genuinely unsure, prefer null (under-flagging is safer than merging two actually- \
+different levels/wings).
+
 Return a single JSON object: {"classifications": [{"sheet_index": <int>, "type": "<one of the types above>", \
-"discipline": "<inferred>"}]}, one entry per sheet given. Output strictly valid JSON, no commentary."""
+"discipline": "<inferred>", "duplicate_of": <sheet_index or null>}]}, one entry per sheet given. Output \
+strictly valid JSON, no commentary."""
 
 # Mirrors the vendored skill's own routing table (SKILL.md, "Routing — model + render per
 # sheet"): text-dominant sheets are already 100% accurate from the vector layer and don't
@@ -113,7 +125,8 @@ def route_for(sheet_type: str) -> str:
     return ROUTING.get(sheet_type, "vision")
 
 
-def classify_sheets(sheets_payload: list[dict]) -> dict[int, str]:
+def classify_sheets(sheets_payload: list[dict]) -> dict[int, dict]:
+    """Returns {sheet_index: {"type": str, "duplicate_of": int | None}}."""
     slim_payload = [
         {
             "sheet_index": s["sheet_index"],
@@ -131,7 +144,10 @@ def classify_sheets(sheets_payload: list[dict]) -> dict[int, str]:
         ],
     )
     data = json.loads(response.choices[0].message.content)
-    return {row["sheet_index"]: row.get("type", "other") for row in data.get("classifications", [])}
+    return {
+        row["sheet_index"]: {"type": row.get("type", "other"), "duplicate_of": row.get("duplicate_of")}
+        for row in data.get("classifications", [])
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +249,13 @@ one of them off the image and reporting it as "the room's dimension" is a real, 
 a partial measurement as the complete size. Only report a room's dimension when you can actually see a \
 complete width+length pair (or a printed area) for it. If you can only make out individual unpaired edge \
 lengths, either skip them or label each one explicitly as partial per the "notes" rule above -- never state a \
-single edge length as if it answers "what are the dimensions of this room.\""""
+single edge length as if it answers "what are the dimensions of this room."
+
+Concrete example of what NOT to do: do not write {"category": "area", "text": "KITCHENETTE: 2.30 m", \
+"reliability": "HIGH"} -- "2.30 m" is a bare length (wrong unit for an "area" category, and it's a visual read \
+so it can never be "HIGH" regardless). The correct version, if that's genuinely all that's visible, is \
+{"category": "dimension", "text": "KITCHENETTE (one wall only, full room dimensions not legible): 2.30 m", \
+"reliability": "MEDIUM"}."""
 
 
 def call_sheet_extraction(sheet_payload: dict, route: str, image_path: str | None) -> dict:
@@ -257,6 +279,34 @@ def call_sheet_extraction(sheet_payload: dict, route: str, image_path: str | Non
         ],
     )
     return json.loads(response.choices[0].message.content)
+
+
+def call_sheet_extraction_with_retry(sheet_payload: dict, route: str, image_path: str | None, attempts: int = 2) -> dict:
+    """A single failed call (rate limit, transient API error) previously fell straight
+    through to an empty result -- silently producing a sheet with no title/number
+    ("original_sheetN", "untitled" in the UI) and no data. One retry catches most of
+    these; the caller still handles a final failure gracefully."""
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return call_sheet_extraction(sheet_payload, route, image_path)
+        except Exception as e:  # noqa: BLE001 - retried, then re-raised for the caller to log
+            last_error = e
+            if attempt < attempts - 1:
+                time.sleep(2)
+    raise last_error
+
+
+AREA_UNIT_RE = re.compile(r"\b(SF|SQ\.?\s*FT|SQFT|M2|M²|SQM|SQ\.?\s*M|SQUARE\s+(FEET|METERS?|METRES?))\b", re.IGNORECASE)
+
+
+def _fix_area_category(category: str | None, text: str | None) -> str | None:
+    """Deterministic guard: a note tagged category "area" must actually contain an area
+    unit (SF, m2, sqm, ...) -- a bare length like "2.30 m" is a dimension, not an area,
+    and mislabeling it invites exactly the "the area is 2.30 meters" bug seen in testing."""
+    if category == "area" and text and not AREA_UNIT_RE.search(text):
+        return "dimension"
+    return category
 
 
 def embed_text(text: str) -> list[float]:
@@ -364,18 +414,26 @@ def ingest_pdf(doc_id: str, pdf_path: Path) -> dict:
     sheet_files: dict[str, str] = {}
     sheet_images: dict[str, str] = {}
     numbers_by_idx: dict[int, str] = {}
+    failed_sheets: list[int] = []
 
     for sp in sheets_payload:
         idx = sp["sheet_index"]
         file_info = file_map[idx]
-        sheet_type = classifications.get(idx, "other")
+        classification = classifications.get(idx, {})
+        sheet_type = classification.get("type", "other")
         route = route_for(sheet_type)
+        # A sheet showing the same physical plan as an earlier sheet (e.g. an
+        # "ARCHITECTURAL PLAN" and its "DIMENSIONED PLAN" companion) still gets its notes/
+        # schedules/markdown extracted normally, but must NOT also propose instance_targets
+        # -- otherwise the same rooms get counted twice, once per sheet.
+        is_duplicate_view = classification.get("duplicate_of") is not None
 
         try:
-            result = call_sheet_extraction(sp, route, file_info.get("image_path"))
+            result = call_sheet_extraction_with_retry(sp, route, file_info.get("image_path"))
         except Exception as e:  # noqa: BLE001 - one sheet's failure shouldn't kill the whole upload
-            print(f"WARNING: extraction failed for sheet {idx}: {e}", file=sys.stderr)
+            print(f"WARNING: extraction failed for sheet {idx} after retries: {e}", file=sys.stderr)
             result = {}
+            failed_sheets.append(idx)
 
         sheet_meta = result.get("sheet") or {}
         number = sheet_meta.get("number") or file_info["stem"]
@@ -408,14 +466,14 @@ def ingest_pdf(doc_id: str, pdf_path: Path) -> dict:
         for row in result.get("notes", []):
             notes_rows.append(
                 {
-                    "category": row.get("category"),
+                    "category": _fix_area_category(row.get("category"), row.get("text")),
                     "text": row.get("text"),
                     "source_sheet": number,
                     "reliability": row.get("reliability", "HIGH"),
                 }
             )
 
-        for target_idx, target in enumerate(result.get("instance_targets", [])):
+        for target_idx, target in enumerate(result.get("instance_targets", []) if not is_duplicate_view else []):
             pattern = target.get("pattern")
             if not pattern:
                 continue
@@ -491,4 +549,5 @@ def ingest_pdf(doc_id: str, pdf_path: Path) -> dict:
         "instance_count": counts.get("instances", 0),
         "note_count": counts.get("notes", 0),
         "provenance_corrections": provenance_corrections,
+        "sheets_failed": len(failed_sheets),
     }

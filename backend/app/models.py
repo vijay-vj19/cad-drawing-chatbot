@@ -18,6 +18,7 @@ class UploadResponse(BaseModel):
     instance_count: int
     note_count: int
     provenance_corrections: int = 0
+    sheets_failed: int = 0
 
 
 class ChatMessage(BaseModel):
