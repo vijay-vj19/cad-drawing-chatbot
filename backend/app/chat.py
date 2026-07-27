@@ -45,7 +45,13 @@ What you have:
    resort, for values that only exist as a drawn dimension/graphic, never as text.
 
 Routing:
-- Counts / "how many" / locations / "where is/are" -> query_sql against `instances`.
+- Counts / "how many" / locations / "where is/are" -> query_sql against `instances` FIRST. If that returns \
+  nothing (it might not be tagged, or might be a set indexed before location tagging improved), do NOT just \
+  report "not in the database" -- immediately try search_markdown for the name next; its "Coordinate hints" \
+  section is built specifically to answer exactly this, and very likely has it even when `instances` doesn't. \
+  Only after trying both should you say a location genuinely isn't available -- and even then, say something \
+  concrete (which sheet/floor it was mentioned on, if you know that much) rather than telling the user to go \
+  look at the sheet themselves.
 - Distance / "how far" / "distance between X and Y" -> see the distance playbook below.
 - Any attribute of a named thing (dimension, area, length, width, rating, material, level, capacity) -> see \
   the attribute playbook below.

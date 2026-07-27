@@ -205,22 +205,27 @@ Return a single JSON object with exactly these keys:
   qualifier. This distinction does not apply to inherently single-length things (a door width, a wall \
   thickness, a pipe diameter) -- those are correctly captured as one number.
 
-- "instance_targets": one entry per COUNTABLE, REPEATED thing that appears as text/tag directly placed on this \
-  sheet if it's a PLAN view (not a schedule row, not description prose) -- so "how many X" / "where are the X" \
-  can be answered exactly, for absolutely any category of tagged or labeled element. Cover BOTH:
+- "instance_targets": one entry per DISTINCTLY LABELED thing that appears as text/tag directly placed on this \
+  sheet if it's a PLAN view (not a schedule row, not description prose). This is the location index for the \
+  whole plan -- it's what lets "how many X", "where are the X", AND "where is the X" all be answered exactly \
+  from real coordinates, for absolutely any category of tagged or labeled element. Do NOT restrict this to \
+  things that repeat -- a room that appears exactly ONCE (a house typically has exactly one "BATHROOM", one \
+  "KITCHEN", one "LIVING ROOM") still needs a location entry just as much as a repeated one, otherwise "where \
+  is the bathroom" has nothing to find even though it's clearly labeled right there on the plan. Cover ALL of:
   (a) A schedule's marks placed as tags on this plan (e.g. F10/F12/F14 footings, D01-D06 doors, MH1-MH5 \
       manholes, C1/C2 columns) -- `pattern` matches the mark exactly as printed on the plan.
-  (b) No schedule at all, but a repeated TYPE label is written directly on this plan (very common for rooms on \
-      residential/commercial sets -- "BEDROOM 1", "KITCHEN", "OFFICE 204" -- but apply the same idea to ANY \
-      discipline: repeated equipment labels, repeated structural callouts, repeated road-furniture labels, \
-      whatever repeats on this specific sheet) -- propose a pattern matching the type, e.g. \
-      "BEDROOM\\\\s*\\\\d*", so instances are counted/located even with nothing backing them in a schedule.
-  Propose an instance_target for EVERY distinct repeated tag/label you can identify -- do not limit yourself to \
-  one or two obvious categories; a single sheet can have many (rooms AND doors AND windows AND structural \
-  marks, all as separate instance_targets). Only propose these if this sheet is a plan view. Each entry: \
-  {"pattern" (a Python regex), "exclude_bboxes" (list of [x0,y0,x1,y1] regions on this sheet to exclude -- a \
-  schedule table, legend, or title block that would otherwise double-count a definition as a placed instance; \
-  empty list if there's nothing to exclude)}.
+  (b) Every room/space label written directly on this plan, whether it appears once or many times (e.g. \
+      "BATHROOM", "KITCHEN", "LIVING ROOM", "DINING AREA", "LOFT", "BEDROOM 1", "OFFICE 204") -- propose a \
+      pattern matching it, e.g. "BATHROOM" or "BEDROOM\\\\s*\\\\d*", so it's located even with nothing backing \
+      it in a schedule and even if there's only one.
+  (c) Any other distinctly labeled element on this plan not covered above (fixtures, equipment, structural \
+      callouts, road furniture -- whatever this specific sheet shows).
+  Propose an instance_target for EVERY distinct labeled item you can identify -- do not limit yourself to a few \
+  obvious categories, and do not skip something just because it only appears once; a single sheet can have many \
+  (every room AND every door AND every window AND every structural mark, all as separate instance_targets). \
+  Only propose these if this sheet is a plan view. Each entry: {"pattern" (a Python regex), "exclude_bboxes" \
+  (list of [x0,y0,x1,y1] regions on this sheet to exclude -- a schedule table, legend, or title block that \
+  would otherwise double-count a definition as a placed instance; empty list if there's nothing to exclude)}.
 
 - "markdown": a thorough markdown summary of this sheet, as a single string -- title, discipline, scale, a \
   prose description of everything shown (not just a one-liner -- describe the layout, what's adjacent to what, \
