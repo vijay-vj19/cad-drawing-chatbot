@@ -1,3 +1,4 @@
+import base64
 import json
 import subprocess
 import sys
@@ -69,17 +70,83 @@ def run_build_db(structured_path: Path, sqlite_out: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — one GPT-4o call: classify sheets, parse schedules/notes, propose
-# instance tag patterns + exclusion boxes, write per-sheet markdown.
+# Step 3a — classify each sheet (cheap, one combined call, text only). This is
+# the routing key for step 3b: text-dominant sheets stay text-only; anything
+# with a plan/section/elevation/detail (or unknown) gets its rendered PNG too.
 # ---------------------------------------------------------------------------
-EXTRACTION_SYSTEM_PROMPT = """You are extracting structured data from a set of CAD/construction drawings for a \
-database. This could be ANY type of drawing set -- a house, an apartment building, a shop fit-out, a multi- \
-storey/skyscraper tower, a road/civil plan, an electrical/mechanical/plumbing layout, or anything else. Do not \
-assume a residential or commercial building; read what's actually on the sheet and adapt. You will be given, \
-for every sheet, its raw vector-extracted text blocks (each with exact bbox coordinates in PDF points) and any \
-title-block candidates already detected positionally.
+CLASSIFICATION_SYSTEM_PROMPT = """Classify each sheet of a CAD/construction drawing set into exactly one type: \
+"general_arrangement" (a plan/layout view), "section_view", "elevation", "detail", "schedule_sheet" (dominated \
+by a tabular schedule), "general_notes" (dominated by notes text), "legend", "single_line_diagram", \
+"cover_sheet", "coordination_drawing", or "other".
 
-The goal is to capture EVERY distinct, nameable thing on each sheet as structured, queryable data -- rooms/ \
+You're given each sheet's title-block text and a text sample. Judge from the title and content -- a title \
+containing "PLAN" is usually general_arrangement, "ELEVATION" -> elevation, "SECTION" -> section_view, \
+"SCHEDULE" -> schedule_sheet, "NOTES" -> general_notes, "DETAIL" -> detail, "LEGEND"/"SYMBOLS" -> legend, \
+"COVER"/"TITLE SHEET" -> cover_sheet, "SINGLE LINE"/"RISER" -> single_line_diagram. Read the content when the \
+title is ambiguous or missing. This works for any drawing discipline -- architectural, structural, civil, \
+electrical, mechanical, plumbing.
+
+Return a single JSON object: {"classifications": [{"sheet_index": <int>, "type": "<one of the types above>", \
+"discipline": "<inferred>"}]}, one entry per sheet given. Output strictly valid JSON, no commentary."""
+
+# Mirrors the vendored skill's own routing table (SKILL.md, "Routing — model + render per
+# sheet"): text-dominant sheets are already 100% accurate from the vector layer and don't
+# need vision; plan/section/elevation/detail sheets carry graphical content (dimension
+# strings, symbols, spatial layout) that only exists as drawing, not text. Unknown defaults
+# to vision, matching the skill's raster-fallback principle (never assume text is enough).
+ROUTING = {
+    "general_notes": "text",
+    "schedule_sheet": "text",
+    "legend": "text",
+    "cover_sheet": "text",
+    "general_arrangement": "vision",
+    "section_view": "vision",
+    "elevation": "vision",
+    "detail": "vision",
+    "single_line_diagram": "vision",
+    "coordination_drawing": "vision",
+    "other": "vision",
+}
+
+
+def route_for(sheet_type: str) -> str:
+    return ROUTING.get(sheet_type, "vision")
+
+
+def classify_sheets(sheets_payload: list[dict]) -> dict[int, str]:
+    slim_payload = [
+        {
+            "sheet_index": s["sheet_index"],
+            "title_block_candidates": s["title_block_candidates"],
+            "text_sample": " ".join(b["text"] for b in s["text_blocks"][:60]),
+        }
+        for s in sheets_payload
+    ]
+    response = client.chat.completions.create(
+        model=config.CLASSIFY_MODEL,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": CLASSIFICATION_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps({"sheets": slim_payload})},
+        ],
+    )
+    data = json.loads(response.choices[0].message.content)
+    return {row["sheet_index"]: row.get("type", "other") for row in data.get("classifications", [])}
+
+
+# ---------------------------------------------------------------------------
+# Step 3b — per-sheet extraction, routed to text-only (cheap model) or
+# vision (the sheet's own rendered PNG + the vector text, strong model).
+# ---------------------------------------------------------------------------
+EXTRACTION_SYSTEM_PROMPT = """You are extracting structured data from ONE sheet of a CAD/construction drawing \
+set for a database. This could be any type of drawing set -- a house, an apartment building, a shop fit-out, a \
+multi-storey/skyscraper tower, a road/civil plan, an electrical/mechanical/plumbing layout, or anything else. \
+Do not assume a residential or commercial building; read what's actually on the sheet and adapt.
+
+You are given this sheet's raw vector-extracted text blocks (each with exact bbox coordinates in PDF points) \
+and any title-block candidates already detected positionally.
+
+The goal is to capture EVERY distinct, nameable thing on this sheet as structured, queryable data -- rooms/ \
 spaces, doors, windows, staircases, structural elements (footings, columns, beams, slabs), fixtures/equipment, \
 civil elements (manholes, catch basins, curbs, light poles, road segments), electrical/mechanical components, \
 or anything else that appears as a distinct labeled/tagged item. Nothing discipline-specific is hardcoded here \
@@ -87,68 +154,89 @@ or anything else that appears as a distinct labeled/tagged item. Nothing discipl
 
 Return a single JSON object with exactly these keys:
 
-- "sheets": one entry per sheet: {"sheet_index", "number", "title", "discipline", "scale"} (read number/title/ \
-  scale from the title block; infer discipline from content, e.g. "architectural", "structural", "civil", \
-  "electrical", "mechanical", "plumbing").
+- "sheet": {"number", "title", "discipline", "scale"} (read number/title/scale from the title block; infer \
+  discipline from content, e.g. "architectural", "structural", "civil", "electrical", "mechanical", "plumbing").
 
 - "schedules": one row per schedule TABLE entry of any kind (footing schedule, door/window schedule, room/ \
   space/finish schedule, fixture schedule, luminaire schedule, pipe/duct schedule, equipment schedule, manhole/ \
-  structure schedule -- whatever tabular catalogue exists on the set). Parse every schedule table COMPLETELY, \
-  one row per type/mark: {"sheet_index", "type", "mark", "properties", "reliability": "HIGH"}. "properties" is \
-  a short human-readable string of that row's other columns -- size, rating, material, area, capacity, invert \
+  structure schedule -- whatever tabular catalogue exists on this sheet). Parse every schedule table \
+  COMPLETELY, one row per type/mark: {"type", "mark", "properties", "reliability": "HIGH"}. "properties" is a \
+  short human-readable string of that row's other columns -- size, rating, material, area, capacity, invert \
   level, whatever is listed. If a dimension, area, or level value is in the row (SF, m2, mm, ft-in, RL=, IL=, \
   CL=), keep it verbatim in "properties" -- exact printed numbers here are the best possible answer to a later \
   question and avoid any need for geometry math.
 
-- "notes": general/sheet notes blocks: {"sheet_index", "category", "text", "reliability": "HIGH"}. ALSO include, \
-  as its own row here, ANY dimension, size, area, level, or rating value printed directly next to a named/ \
-  tagged element on a PLAN, SECTION, or ELEVATION view (not in a schedule) -- this is extremely common and is \
-  the single most reliable source for a later "what's the X of Y" question. Examples, follow this pattern for \
-  whatever the drawing actually shows: {"category": "area", "text": "LOBBY: 850 SF"}, {"category": "dimension", \
-  "text": "PATIO: 12'-0\\" x 10'-0\\""}, {"category": "dimension", "text": "DOOR D01: 3'-0\\" WIDE"}, \
-  {"category": "level", "text": "MH3: IL=45.20"}. Capture every one you can find -- do not skip these because \
-  they seem minor; they are exactly what "dimension of X" / "how big is Y" questions need.
+- "notes": general/sheet notes blocks: {"category", "text", "reliability": "HIGH"}. ALSO include, as its own \
+  row here, ANY dimension, size, area, level, or rating value printed directly next to a named/tagged element \
+  on a PLAN, SECTION, or ELEVATION view (not in a schedule) -- this is extremely common and is the single most \
+  reliable source for a later "what's the X of Y" question. Examples, follow this pattern for whatever the \
+  drawing actually shows: {"category": "area", "text": "LOBBY: 850 SF"}, {"category": "dimension", "text": \
+  "PATIO: 12'-0\\" x 10'-0\\""}, {"category": "dimension", "text": "DOOR D01: 3'-0\\" WIDE"}, {"category": \
+  "level", "text": "MH3: IL=45.20"}. Capture every one you can find -- do not skip these because they seem \
+  minor; they are exactly what "dimension of X" / "how big is Y" questions need.
 
-- "instance_targets": one entry per COUNTABLE, REPEATED thing that appears as text/tag directly placed on a \
-  PLAN view (not a schedule row, not description prose) -- so "how many X" / "where are the X" can be answered \
-  exactly, for absolutely any category of tagged or labeled element. Cover BOTH:
-  (a) A schedule's marks placed as tags on a plan (e.g. F10/F12/F14 footings, D01-D06 doors, MH1-MH5 manholes, \
-      C1/C2 columns) -- `pattern` matches the mark exactly as printed on the plan.
-  (b) No schedule at all, but a repeated TYPE label is written directly on a plan (very common for rooms on \
+- "instance_targets": one entry per COUNTABLE, REPEATED thing that appears as text/tag directly placed on this \
+  sheet if it's a PLAN view (not a schedule row, not description prose) -- so "how many X" / "where are the X" \
+  can be answered exactly, for absolutely any category of tagged or labeled element. Cover BOTH:
+  (a) A schedule's marks placed as tags on this plan (e.g. F10/F12/F14 footings, D01-D06 doors, MH1-MH5 \
+      manholes, C1/C2 columns) -- `pattern` matches the mark exactly as printed on the plan.
+  (b) No schedule at all, but a repeated TYPE label is written directly on this plan (very common for rooms on \
       residential/commercial sets -- "BEDROOM 1", "KITCHEN", "OFFICE 204" -- but apply the same idea to ANY \
       discipline: repeated equipment labels, repeated structural callouts, repeated road-furniture labels, \
-      whatever repeats on this specific set) -- propose a pattern matching the type, e.g. "BEDROOM\\\\s*\\\\d*", \
-      so instances are counted/located even with nothing backing them in a schedule.
-  Propose an instance_target for EVERY distinct repeated tag/label you can identify on a plan sheet -- do not \
-  limit yourself to one or two obvious categories; a single sheet can have many (rooms AND doors AND windows \
-  AND structural marks, all as separate instance_targets). Each entry: {"sheet_index" (the sheet showing the \
-  PLAN with the tags/labels), "pattern" (a Python regex), "exclude_bboxes" (list of [x0,y0,x1,y1] regions on \
-  that sheet to exclude -- a schedule table, legend, or title block that would otherwise double-count a \
-  definition as a placed instance; empty list if there's nothing to exclude)}.
+      whatever repeats on this specific sheet) -- propose a pattern matching the type, e.g. \
+      "BEDROOM\\\\s*\\\\d*", so instances are counted/located even with nothing backing them in a schedule.
+  Propose an instance_target for EVERY distinct repeated tag/label you can identify -- do not limit yourself to \
+  one or two obvious categories; a single sheet can have many (rooms AND doors AND windows AND structural \
+  marks, all as separate instance_targets). Only propose these if this sheet is a plan view. Each entry: \
+  {"pattern" (a Python regex), "exclude_bboxes" (list of [x0,y0,x1,y1] regions on this sheet to exclude -- a \
+  schedule table, legend, or title block that would otherwise double-count a definition as a placed instance; \
+  empty list if there's nothing to exclude)}.
 
-- "markdown": one entry per sheet: {"sheet_index", "content"} -- a thorough markdown summary of that sheet: \
-  title, discipline, scale, a prose description of everything shown (not just a one-liner -- describe the \
-  layout, what's adjacent to what, any labeled elements, any callouts), and its schedules/notes rendered as \
-  tables. This is for retrieval, not for counting. End it with a "## Coordinate hints" section listing every \
-  named/tagged element visible on a plan (room, door, staircase, fixture, structural mark, civil structure -- \
-  anything with a label) with its approximate bbox and any printed value shown right next to it, e.g. \
-  "- LOBBY: near [120, 340, 180, 355], AREA: 850 SF", "- STAIR 1: near [400, 200, 440, 260]", "- D01: near \
-  [60, 500, 80, 520], WIDTH: 3'-0\\"". This is what lets later questions -- area, dimension, distance between \
-  two elements -- be answered by locating the element(s) first. Be exhaustive here; omit the section only if \
-  the sheet genuinely has no such labels (e.g. a pure notes/schedule sheet).
+- "markdown": a thorough markdown summary of this sheet, as a single string -- title, discipline, scale, a \
+  prose description of everything shown (not just a one-liner -- describe the layout, what's adjacent to what, \
+  any labeled elements, any callouts), and its schedules/notes rendered as tables. This is for retrieval, not \
+  for counting. End it with a "## Coordinate hints" section listing every named/tagged element visible on a \
+  plan (room, door, staircase, fixture, structural mark, civil structure -- anything with a label) with its \
+  approximate bbox and any printed value shown right next to it, e.g. "- LOBBY: near [120, 340, 180, 355], \
+  AREA: 850 SF", "- STAIR 1: near [400, 200, 440, 260]", "- D01: near [60, 500, 80, 520], WIDTH: 3'-0\\"". This \
+  is what lets later questions -- area, dimension, distance between two elements -- be answered by locating the \
+  element(s) first. Be exhaustive here; omit the section only if this sheet genuinely has no such labels (e.g. \
+  a pure notes/schedule sheet).
 
-Never invent a value -- everything above must be read directly from the given text. Store counts/marks/values \
-exactly as they literally appear on the sheet. If a sheet has no schedules, no taggable plan, or no notable \
-callouts, omit it from the relevant list rather than guessing. Output strictly valid JSON, no commentary."""
+Never invent a value -- everything above must be read directly from what you're given. Store counts/marks/ \
+values exactly as they literally appear on the sheet. If this sheet has no schedules, isn't a taggable plan, \
+or has no notable callouts, return an empty list for the relevant key rather than guessing. Output strictly \
+valid JSON, no commentary."""
+
+VISION_ADDENDUM = """
+
+You are ALSO given a rendered image of this exact sheet. Use it for anything that isn't captured as clean \
+text -- most importantly graphical dimension strings (extension lines + arrows + a printed number), symbols, \
+and spatial layout/adjacency. Read the image carefully for any dimension, size, or label that the text blocks \
+alone wouldn't reveal. IMPORTANT: any value you read from the image that is NOT also confirmed in the given \
+text blocks must be tagged "reliability": "MEDIUM", never "HIGH" -- it's a visual read, not exact extracted \
+text. Never invent a digit or value you can't clearly read off the image; if a dimension is illegible, skip it \
+rather than guessing."""
 
 
-def call_extraction_model(sheets_payload: list[dict]) -> dict:
+def call_sheet_extraction(sheet_payload: dict, route: str, image_path: str | None) -> dict:
+    system_prompt = EXTRACTION_SYSTEM_PROMPT
+    content: list[dict] = [{"type": "text", "text": json.dumps(sheet_payload)}]
+
+    if route == "vision" and image_path and Path(image_path).exists():
+        system_prompt = system_prompt + VISION_ADDENDUM
+        b64 = base64.b64encode(Path(image_path).read_bytes()).decode()
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+        model = config.CHAT_MODEL
+    else:
+        model = config.CLASSIFY_MODEL
+
     response = client.chat.completions.create(
-        model=config.CHAT_MODEL,
+        model=model,
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps({"sheets": sheets_payload})},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": content},
         ],
     )
     return json.loads(response.choices[0].message.content)
@@ -157,6 +245,52 @@ def call_extraction_model(sheets_payload: list[dict]) -> dict:
 def embed_text(text: str) -> list[float]:
     response = client.embeddings.create(model=config.EMBEDDING_MODEL, input=text)
     return response.data[0].embedding
+
+
+# ---------------------------------------------------------------------------
+# Step 5e — provenance validation (the vendored skill calls this mandatory:
+# confirms every atomic fact's tokens actually appear on its cited sheet,
+# relocating rows that got attributed to the wrong sheet).
+# ---------------------------------------------------------------------------
+def run_provenance_validation(
+    doc_dir: Path, file_map: dict, numbers_by_idx: dict, structured_path: Path, sqlite_out: Path
+) -> int:
+    text_dir = doc_dir / "sheet_text"
+    text_dir.mkdir(exist_ok=True)
+    for idx, number in numbers_by_idx.items():
+        extraction_path = Path(file_map[idx]["extraction_path"])
+        data = json.loads(extraction_path.read_text())
+        safe_name = number.replace("/", "_").replace(" ", "_")
+        (text_dir / f"{safe_name}.txt").write_text(data.get("all_text", ""), encoding="utf-8")
+
+    fields_path = doc_dir / "provenance_fields.json"
+    fields_path.write_text(
+        json.dumps({"schedules": ["mark", "properties", "source_sheet"], "notes": ["category", "text", "source_sheet"]})
+    )
+    report_path = doc_dir / "provenance_report.json"
+
+    try:
+        _run_script(
+            [
+                str(config.SCRIPTS_DIR / "validate_provenance.py"),
+                str(structured_path),
+                "--textdir", str(text_dir),
+                "--fields", str(fields_path),
+                "--apply",
+                "-o", str(report_path),
+            ]
+        )
+    except RuntimeError:
+        return 0
+
+    report = json.loads(report_path.read_text()) if report_path.exists() else []
+    relocations = sum(1 for row in report if str(row.get("action", "")).startswith("RELOCATE"))
+
+    validated_path = Path(str(structured_path).replace(".json", "_validated.json"))
+    if relocations and validated_path.exists():
+        run_build_db(validated_path, sqlite_out)
+
+    return relocations
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +308,7 @@ def _build_sheets_payload(manifest: dict) -> tuple[list[dict], dict]:
         file_map[i] = {
             "stem": stem,
             "pdf_path": sheet["pdf_path"],
+            "image_path": sheet.get("image_path"),
             "extraction_path": str(extraction_path),
         }
         payload.append(
@@ -202,79 +337,99 @@ def ingest_pdf(doc_id: str, pdf_path: Path) -> dict:
     manifest = run_process_drawing(pdf_path, split_dir)
 
     sheets_payload, file_map = _build_sheets_payload(manifest)
-    extraction = call_extraction_model(sheets_payload)
+    classifications = classify_sheets(sheets_payload)
 
-    sheet_info = {s["sheet_index"]: s for s in extraction.get("sheets", [])}
+    sheets_rows: list[dict] = []
+    schedules_rows: list[dict] = []
+    notes_rows: list[dict] = []
+    instances_rows: list[dict] = []
+    markdown_entries: list[tuple[str, str]] = []
+    sheet_files: dict[str, str] = {}
+    sheet_images: dict[str, str] = {}
+    numbers_by_idx: dict[int, str] = {}
 
-    def number_for(idx: int) -> str:
-        info = sheet_info.get(idx, {})
-        return info.get("number") or file_map.get(idx, {}).get("stem", f"sheet{idx}")
+    for sp in sheets_payload:
+        idx = sp["sheet_index"]
+        file_info = file_map[idx]
+        sheet_type = classifications.get(idx, "other")
+        route = route_for(sheet_type)
 
-    sheets_rows = [
-        {
-            "number": number_for(info["sheet_index"]),
-            "title": info.get("title"),
-            "discipline": info.get("discipline"),
-            "scale": info.get("scale"),
-            "source_sheet": number_for(info["sheet_index"]),
-        }
-        for info in extraction.get("sheets", [])
-    ]
-
-    # Persist number -> single-sheet PDF path so /chat's query_pdf tool can find the
-    # right file without re-deriving it from the model's output.
-    sheet_files = {number_for(idx): info["pdf_path"] for idx, info in file_map.items()}
-    (d / "sheet_files.json").write_text(json.dumps(sheet_files, indent=2))
-
-    schedules_rows = [
-        {
-            "type": row.get("type"),
-            "mark": row.get("mark"),
-            "properties": row.get("properties"),
-            "source_sheet": number_for(row.get("sheet_index")),
-            "reliability": row.get("reliability", "HIGH"),
-        }
-        for row in extraction.get("schedules", [])
-    ]
-
-    notes_rows = [
-        {
-            "category": row.get("category"),
-            "text": row.get("text"),
-            "source_sheet": number_for(row.get("sheet_index")),
-            "reliability": row.get("reliability", "HIGH"),
-        }
-        for row in extraction.get("notes", [])
-    ]
-
-    instances_rows = []
-    for target_idx, target in enumerate(extraction.get("instance_targets", [])):
-        idx = target.get("sheet_index")
-        file_info = file_map.get(idx)
-        pattern = target.get("pattern")
-        if not file_info or not pattern:
-            continue
-        out_path = split_dir / f"instances_{idx}_{target_idx}.json"
         try:
-            results = run_extract_instances(
-                Path(file_info["extraction_path"]),
-                pattern,
-                number_for(idx),
-                target.get("exclude_bboxes", []),
-                out_path,
-            )
-        except (RuntimeError, json.JSONDecodeError):
-            continue
-        for r in results:
-            instances_rows.append(
+            result = call_sheet_extraction(sp, route, file_info.get("image_path"))
+        except Exception as e:  # noqa: BLE001 - one sheet's failure shouldn't kill the whole upload
+            print(f"WARNING: extraction failed for sheet {idx}: {e}", file=sys.stderr)
+            result = {}
+
+        sheet_meta = result.get("sheet") or {}
+        number = sheet_meta.get("number") or file_info["stem"]
+        numbers_by_idx[idx] = number
+        sheet_files[number] = file_info["pdf_path"]
+        if file_info.get("image_path"):
+            sheet_images[number] = file_info["image_path"]
+
+        sheets_rows.append(
+            {
+                "number": number,
+                "title": sheet_meta.get("title"),
+                "discipline": sheet_meta.get("discipline"),
+                "scale": sheet_meta.get("scale"),
+                "source_sheet": number,
+            }
+        )
+
+        for row in result.get("schedules", []):
+            schedules_rows.append(
                 {
-                    "tag": r["tag"],
-                    "x": r["x"],
-                    "y": r["y"],
-                    "source_sheet": number_for(idx),
-                    "reliability": "HIGH",
+                    "type": row.get("type"),
+                    "mark": row.get("mark"),
+                    "properties": row.get("properties"),
+                    "source_sheet": number,
+                    "reliability": row.get("reliability", "HIGH"),
                 }
             )
+
+        for row in result.get("notes", []):
+            notes_rows.append(
+                {
+                    "category": row.get("category"),
+                    "text": row.get("text"),
+                    "source_sheet": number,
+                    "reliability": row.get("reliability", "HIGH"),
+                }
+            )
+
+        for target_idx, target in enumerate(result.get("instance_targets", [])):
+            pattern = target.get("pattern")
+            if not pattern:
+                continue
+            out_path = split_dir / f"instances_{idx}_{target_idx}.json"
+            try:
+                extracted = run_extract_instances(
+                    Path(file_info["extraction_path"]),
+                    pattern,
+                    number,
+                    target.get("exclude_bboxes", []),
+                    out_path,
+                )
+            except (RuntimeError, json.JSONDecodeError):
+                continue
+            for r in extracted:
+                instances_rows.append(
+                    {
+                        "tag": r["tag"],
+                        "x": r["x"],
+                        "y": r["y"],
+                        "source_sheet": number,
+                        "reliability": "HIGH",
+                    }
+                )
+
+        content = result.get("markdown")
+        if content:
+            markdown_entries.append((number, content))
+
+    (d / "sheet_files.json").write_text(json.dumps(sheet_files, indent=2))
+    (d / "sheet_images.json").write_text(json.dumps(sheet_images, indent=2))
 
     structured = {
         "sheets": sheets_rows,
@@ -286,6 +441,10 @@ def ingest_pdf(doc_id: str, pdf_path: Path) -> dict:
     structured_path.write_text(json.dumps(structured, indent=2))
     run_build_db(structured_path, config.sqlite_path(doc_id))
 
+    provenance_corrections = run_provenance_validation(
+        d, file_map, numbers_by_idx, structured_path, config.sqlite_path(doc_id)
+    )
+
     # Per-sheet markdown -> embed -> store in the `chunks` table (simple in-SQLite vector store).
     conn = db.get_conn(doc_id)
     # build_db.py skips creating a table when its list is empty (e.g. no schedules on this
@@ -295,12 +454,7 @@ def ingest_pdf(doc_id: str, pdf_path: Path) -> dict:
     db.ensure_chunks_table(conn)
     markdown_dir = d / "markdown"
     markdown_dir.mkdir(exist_ok=True)
-    for md in extraction.get("markdown", []):
-        idx = md.get("sheet_index")
-        content = md.get("content")
-        if not content:
-            continue
-        number = number_for(idx)
+    for number, content in markdown_entries:
         safe_name = number.replace("/", "_").replace(" ", "_")
         (markdown_dir / f"{safe_name}.md").write_text(content, encoding="utf-8")
         embedding = embed_text(content)
@@ -319,4 +473,5 @@ def ingest_pdf(doc_id: str, pdf_path: Path) -> dict:
         "schedule_count": counts.get("schedules", 0),
         "instance_count": counts.get("instances", 0),
         "note_count": counts.get("notes", 0),
+        "provenance_corrections": provenance_corrections,
     }

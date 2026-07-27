@@ -30,7 +30,9 @@ export default function UploadPanel({ onUploaded }) {
       <h2>1. Upload drawing set</h2>
       <input type="file" accept="application/pdf" onChange={handleFileChange} disabled={status === "uploading"} />
 
-      {status === "uploading" && <p className="hint">Ingesting PDF — splitting sheets, extracting data…</p>}
+      {status === "uploading" && (
+        <p className="hint">Ingesting PDF — classifying sheets, extracting data (plan/section sheets are read visually, this can take a bit)…</p>
+      )}
       {status === "error" && <p className="error">{error}</p>}
 
       {status === "done" && summary && (
@@ -38,6 +40,9 @@ export default function UploadPanel({ onUploaded }) {
           <p>
             <strong>{summary.sheet_count}</strong> sheets ingested — {summary.schedule_count} schedule rows,{" "}
             {summary.instance_count} placed instances, {summary.note_count} notes.
+            {summary.provenance_corrections > 0 && (
+              <> {summary.provenance_corrections} provenance correction{summary.provenance_corrections === 1 ? "" : "s"} applied.</>
+            )}
           </p>
           <ul>
             {summary.sheets.map((s) => (

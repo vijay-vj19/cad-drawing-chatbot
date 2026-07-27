@@ -1,9 +1,11 @@
+import base64
 import importlib.util
 import json
 import math
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 from . import config, db, ingest
 
@@ -39,6 +41,8 @@ What you have:
    database (an area, a dimension, raw text/tables in a region).
 4. measure_distance -- computes the real-world distance between two points on the same sheet, once you know \
    both points' (x,y).
+5. view_sheet_image -- a live visual read of a sheet's rendered image for a specific question. True last \
+   resort, for values that only exist as a drawn dimension/graphic, never as text.
 
 Routing:
 - Counts / "how many" / locations / "where is/are" -> query_sql against `instances`.
@@ -62,11 +66,15 @@ Playbook for "<attribute> of <named thing>" (e.g. "square footage of the lobby",
    bbox around the location as a last resort. If "polygons" comes back with 0 results (common -- walls are \
    often drawn as separate segments, not one closed boundary), try "dimensions" in the same bbox before giving \
    up.
-4. Do NOT ask the user for the drawing scale -- query_pdf and measure_distance resolve it automatically and \
+4. STILL nothing? Call view_sheet_image(sheet_number, question) as the true last resort -- a live visual read \
+   of the rendered sheet, for exactly the case where a value only exists as a drawn dimension string (extension \
+   lines + arrows + a number) rather than clean text, which none of the steps above can see. Always MEDIUM \
+   reliability, always hedged -- a visual read can misjudge a small printed number.
+5. Do NOT ask the user for the drawing scale -- query_pdf and measure_distance resolve it automatically and \
    report what they used (or that none was found). If a tool result says no scale was found, say that plainly \
    in one sentence; do not loop asking the user for it.
-5. Only after actually trying this whole chain, if nothing is found anywhere, say so directly and briefly -- do \
-   not pad the answer with a paragraph of caveats.
+6. Only after actually trying this whole chain (including the visual read), if nothing is found anywhere, say \
+   so directly and briefly -- do not pad the answer with a paragraph of caveats.
 
 Playbook for "distance between A and B" / "how far is X from Y":
 1. Find each element's (x,y) and sheet -- query_sql against `instances` first (`SELECT tag,x,y,source_sheet \
@@ -185,6 +193,26 @@ TOOLS = [
                     "y2": {"type": "number"},
                 },
                 "required": ["sheet_number", "x1", "y1", "x2", "y2"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_sheet_image",
+            "description": (
+                "Last-resort visual read of a sheet's rendered image, for a specific question -- e.g. a "
+                "graphical dimension string, symbol, or spatial detail that query_sql/search_markdown/query_pdf "
+                "couldn't resolve as text. Only use after those have been tried and come up empty. Reliability "
+                "MEDIUM, always hedge -- a visual read is not pixel-precise and can misread small text."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sheet_number": {"type": "string", "description": "The sheet's `number` from the sheets table."},
+                    "question": {"type": "string", "description": "The specific thing to look for/answer from the image."},
+                },
+                "required": ["sheet_number", "question"],
             },
         },
     },
@@ -318,7 +346,41 @@ def _measure_distance(conn, sheet_files: dict, args: dict) -> dict:
     return result
 
 
-def _dispatch_tool(conn, sheet_files: dict, name: str, args: dict) -> dict:
+def _view_sheet_image(sheet_images: dict, args: dict) -> dict:
+    image_path = sheet_images.get(args["sheet_number"])
+    if not image_path or not Path(image_path).exists():
+        return {"error": f"no rendered image available for sheet_number {args['sheet_number']!r}"}
+
+    b64 = base64.b64encode(Path(image_path).read_bytes()).decode()
+    response = ingest.client.chat.completions.create(
+        model=config.CHAT_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are reading one construction drawing sheet image to answer one specific question. "
+                    "Only state what you can actually see; if the answer isn't legible or isn't shown on this "
+                    "sheet, say so plainly rather than guessing. Be precise and concise."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": args["question"]},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ],
+            },
+        ],
+    )
+    return {
+        "visual_answer": response.choices[0].message.content or "",
+        "sheet_number": args["sheet_number"],
+        "reliability": "MEDIUM",
+        "note": "live visual read of the rendered sheet image -- not pixel-precise, verify before stating as fact",
+    }
+
+
+def _dispatch_tool(conn, sheet_files: dict, sheet_images: dict, name: str, args: dict) -> dict:
     if name == "query_sql":
         try:
             return {"rows": db.run_readonly_sql(conn, args["sql"])}
@@ -331,12 +393,16 @@ def _dispatch_tool(conn, sheet_files: dict, name: str, args: dict) -> dict:
         return _query_pdf(conn, sheet_files, args)
     if name == "measure_distance":
         return _measure_distance(conn, sheet_files, args)
+    if name == "view_sheet_image":
+        return _view_sheet_image(sheet_images, args)
     return {"error": f"unknown tool {name!r}"}
 
 
 def answer_question(doc_id: str, question: str, history: list[dict] | None = None) -> dict:
     sheet_files_path = config.doc_dir(doc_id) / "sheet_files.json"
     sheet_files = json.loads(sheet_files_path.read_text()) if sheet_files_path.exists() else {}
+    sheet_images_path = config.doc_dir(doc_id) / "sheet_images.json"
+    sheet_images = json.loads(sheet_images_path.read_text()) if sheet_images_path.exists() else {}
 
     conn = db.get_conn(doc_id)
     db.ensure_chunks_table(conn)
@@ -367,7 +433,7 @@ def answer_question(doc_id: str, question: str, history: list[dict] | None = Non
             for tc in msg.tool_calls:
                 args = json.loads(tc.function.arguments or "{}")
                 tool_calls_made.append(tc.function.name)
-                result = _dispatch_tool(conn, sheet_files, tc.function.name, args)
+                result = _dispatch_tool(conn, sheet_files, sheet_images, tc.function.name, args)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result)})
 
         return {

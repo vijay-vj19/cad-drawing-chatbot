@@ -17,6 +17,10 @@ except ImportError:
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "gpt-4o")
+# Cheap/fast model for sheet classification and text-only sheet extraction (notes/schedule/
+# legend/cover sheets -- the skill's own routing table sends these to its cheapest tier
+# since the vector text layer is already 100% accurate for them; no vision needed).
+CLASSIFY_MODEL = os.environ.get("CLASSIFY_MODEL", "gpt-4o-mini")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 
 # Below this many characters of extracted text per page, treat the sheet as having
