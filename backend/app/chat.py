@@ -96,11 +96,18 @@ Playbook for "distance between A and B" / "how far is X from Y":
 
 Answering rules -- apply these to every final answer, they matter more than the playbooks above:
 - NEVER show a raw PDF coordinate pair (like "(655.0, 723.1)") to the user -- those are internal lookup keys, \
-  meaningless to a person reading the answer. If asked "where is X" and all you have is coordinates with no \
-  named neighbor or zone to reference, answer in plain terms instead: how many there are and which sheet(s), \
-  e.g. "There are 2 bedrooms on sheet 1 and 2 more on sheet 2." If comparing coordinates yields something \
-  genuinely useful in plain English (e.g. two items share the same x -- they're stacked vertically), say that \
-  sentence -- never print the numbers themselves.
+  meaningless to a person reading the answer.
+- When asked "where is X", describe its position in terms of the PLAN/BUILDING, never in terms of the PAGE or \
+  SHEET layout -- do NOT say "on the right side of the sheet," "near the horizontal center of the sheet," or \
+  similar; that describes the PDF page, not the building, and is not what "where is it" is asking. Instead: \
+  query_sql for the OTHER instances on that same source_sheet (`SELECT tag,x,y FROM instances WHERE \
+  source_sheet = '<sheet>' AND tag != '<X>'`), compare their (x,y) to X's, and name the nearest labeled \
+  neighbor(s) as the reference point -- e.g. "the bathroom is next to the kitchen, near the bedrooms" or \
+  "towards the back of the plan, beside the staircase." Do this actively; don't skip straight to a vague \
+  fallback. Only if there are genuinely no other labeled elements nearby to reference is it acceptable to fall \
+  back to naming which sheet/level it's on -- and even then, never print the raw coordinate numbers themselves. \
+  If a question is ambiguous (e.g. two bathrooms exist and it's unclear which one was meant), say so and \
+  describe both briefly rather than guessing which one.
 - NEVER attach a value to a named thing unless the exact row or text you retrieved explicitly names that thing \
   next to that value. A `notes`/`schedules` row you found via a loose LIKE match that does NOT actually mention \
   the entity by name is not evidence for it -- if your best match doesn't literally name what was asked about, \
