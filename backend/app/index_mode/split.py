@@ -10,7 +10,15 @@ from .. import config
 def run_process_drawing(pdf_path: Path, split_dir: Path) -> dict:
     """Step 2: split the PDF into per-sheet PDFs, PNGs, and vector-extraction JSON.
     Pure script, no LLM -- process_drawing.py does the mechanical splitting."""
-    cmd = [sys.executable, str(config.SCRIPTS_DIR / "process_drawing.py"), str(pdf_path), "-o", str(split_dir)]
+    cmd = [
+        sys.executable,
+        str(config.SCRIPTS_DIR / "process_drawing.py"),
+        str(pdf_path),
+        "-o",
+        str(split_dir),
+        "--long-edge-px",
+        str(config.RENDER_LONG_EDGE_PX),
+    ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"process_drawing.py failed:\n{result.stderr}")
