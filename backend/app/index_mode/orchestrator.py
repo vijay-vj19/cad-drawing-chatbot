@@ -32,7 +32,10 @@ def start_ingest(doc_id: str, pdf_path: Path, perspective: str) -> dict:
     if mode_decision["mode"] == "light":
         return run_light_ingest(doc_id, sheet_index, mode_decision["reason"])
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    # max_workers kept low (not e.g. 4+) -- each concurrent sheet holds a base64-encoded PNG
+    # + request/response payload in memory at once; higher concurrency OOM-killed this on a
+    # 512MB host. Trades some wall-clock speed for staying within a small memory budget.
+    with ThreadPoolExecutor(max_workers=2) as pool:
         classified_sheets = list(pool.map(classify.classify_sheet, sheet_index["sheets"]))
     classification = {"classified_at": None, "model": config.CHEAP_MODEL, "sheets": classified_sheets}
     (d / "sheet_classification.json").write_text(json.dumps(classification, indent=2))
@@ -95,7 +98,7 @@ def run_full_pipeline(doc_id: str, classification: dict, perspective: str, scope
     (d / "symbol_library.json").write_text(json.dumps(symbol_library, indent=2))
 
     # Step 5 (+ its structured-facts side): one call per sheet, parallelized.
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         analyses = list(pool.map(lambda s: analyze_sheet(s, s["drawing_type"], perspective), sheets))
 
     sheets_rows, schedules_rows, notes_rows, relationships_rows = [], [], [], []
