@@ -8,7 +8,10 @@ function App() {
 
   return (
     <div className="app">
-      <h1>Drawing Set Chatbot</h1>
+      <div className="app-header">
+        <h1>Drawing Set Chatbot</h1>
+        <p className="app-subtitle">Upload a CAD drawing set, then ask questions about it.</p>
+      </div>
       <div className="layout">
         <UploadPanel onUploaded={setDocId} />
         <ChatPanel docId={docId} />

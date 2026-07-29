@@ -4,5 +4,4 @@ python-multipart
 pymupdf
 pdfplumber
 openai
-numpy
 python-dotenv

@@ -50,8 +50,9 @@
   }
 }
 
-body {
+html, body {
   margin: 0;
+  height: 100%;
 }
 
 #root {
@@ -60,7 +61,8 @@ body {
   margin: 0 auto;
   text-align: center;
   border-inline: 1px solid var(--border);
-  min-height: 100svh;
+  height: 100svh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;

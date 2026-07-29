@@ -1,9 +1,69 @@
-import json
 import sqlite3
 
-import numpy as np
-
 from . import config
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS sheets (
+    sheet_id TEXT,
+    title TEXT,
+    drawing_type TEXT,
+    discipline TEXT,
+    scale TEXT,
+    rev TEXT,
+    source_pdf TEXT
+);
+
+CREATE TABLE IF NOT EXISTS schedules (
+    type TEXT,
+    mark TEXT,
+    properties TEXT,
+    source_sheet TEXT,
+    reliability TEXT
+);
+
+CREATE TABLE IF NOT EXISTS instances (
+    tag TEXT,
+    entity_type TEXT,
+    x REAL,
+    y REAL,
+    sheet_id TEXT,
+    grid TEXT,
+    properties TEXT,
+    reliability TEXT
+);
+
+CREATE TABLE IF NOT EXISTS notes (
+    topic TEXT,
+    text TEXT,
+    source_sheet TEXT,
+    reliability TEXT
+);
+
+CREATE TABLE IF NOT EXISTS relationships (
+    from_entity TEXT,
+    relation TEXT,
+    to_entity TEXT,
+    source_sheet TEXT,
+    reliability TEXT
+);
+
+CREATE TABLE IF NOT EXISTS context_notes (
+    note TEXT,
+    reliability TEXT,
+    basis TEXT,
+    what_to_verify TEXT,
+    source_sheet TEXT
+);
+
+CREATE TABLE IF NOT EXISTS placeholders (
+    entity_or_topic TEXT,
+    what_is_missing TEXT,
+    why TEXT,
+    suggested_sheet TEXT
+);
+"""
+
+CORE_TABLES = ["sheets", "schedules", "instances", "notes", "relationships", "context_notes", "placeholders"]
 
 
 def get_conn(doc_id: str) -> sqlite3.Connection:
@@ -12,72 +72,9 @@ def get_conn(doc_id: str) -> sqlite3.Connection:
     return conn
 
 
-CORE_TABLE_COLUMNS = {
-    "sheets": ["number", "title", "discipline", "scale", "source_sheet"],
-    "schedules": ["type", "mark", "properties", "source_sheet", "reliability"],
-    "instances": ["tag", "x", "y", "source_sheet", "reliability"],
-    "notes": ["category", "text", "source_sheet", "reliability"],
-}
-
-
-def ensure_core_tables(conn: sqlite3.Connection) -> None:
-    """build_db.py only creates a table when its list is non-empty (e.g. a document with
-    no schedules or no placed instances), which left `query_sql` failing with 'no such
-    table' instead of just returning zero rows. Make sure all four tables always exist."""
-    for table, columns in CORE_TABLE_COLUMNS.items():
-        cols_sql = ",".join(f'"{c}" TEXT' for c in columns)
-        conn.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({cols_sql})')
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(SCHEMA)
     conn.commit()
-
-
-def ensure_chunks_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chunks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_sheet TEXT,
-            reliability TEXT,
-            text TEXT,
-            embedding BLOB
-        )
-        """
-    )
-    conn.commit()
-
-
-def insert_chunk(conn: sqlite3.Connection, source_sheet: str, reliability: str, text: str, embedding: list[float]) -> None:
-    vec = np.array(embedding, dtype=np.float32).tobytes()
-    conn.execute(
-        "INSERT INTO chunks (source_sheet, reliability, text, embedding) VALUES (?, ?, ?, ?)",
-        (source_sheet, reliability, text, vec),
-    )
-    conn.commit()
-
-
-def search_chunks(conn: sqlite3.Connection, query_embedding: list[float], top_k: int = 4) -> list[dict]:
-    rows = conn.execute("SELECT source_sheet, reliability, text, embedding FROM chunks").fetchall()
-    if not rows:
-        return []
-    q = np.array(query_embedding, dtype=np.float32)
-    q_norm = np.linalg.norm(q) or 1.0
-
-    scored = []
-    for row in rows:
-        vec = np.frombuffer(row["embedding"], dtype=np.float32)
-        denom = (np.linalg.norm(vec) * q_norm) or 1.0
-        score = float(np.dot(vec, q) / denom)
-        scored.append((score, row))
-
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [
-        {
-            "source_sheet": row["source_sheet"],
-            "reliability": row["reliability"],
-            "text": row["text"],
-            "score": round(score, 4),
-        }
-        for score, row in scored[:top_k]
-    ]
 
 
 def run_readonly_sql(conn: sqlite3.Connection, sql: str) -> list[dict]:
@@ -91,17 +88,6 @@ def run_readonly_sql(conn: sqlite3.Connection, sql: str) -> list[dict]:
 
 def table_counts(conn: sqlite3.Connection) -> dict:
     counts = {}
-    for table in ("sheets", "schedules", "instances", "notes"):
-        try:
-            counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        except sqlite3.OperationalError:
-            counts[table] = 0
+    for table in CORE_TABLES:
+        counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     return counts
-
-
-def list_sheets(conn: sqlite3.Connection) -> list[dict]:
-    try:
-        rows = conn.execute("SELECT * FROM sheets").fetchall()
-    except sqlite3.OperationalError:
-        return []
-    return [dict(row) for row in rows]

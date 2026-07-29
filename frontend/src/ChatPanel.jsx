@@ -1,10 +1,15 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { askQuestion } from "./api";
 
 export default function ChatPanel({ docId }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages, asking]);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -42,7 +47,8 @@ export default function ChatPanel({ docId }) {
             <div className="bubble">{m.content}</div>
           </div>
         ))}
-        {asking && <div className="message assistant"><div className="bubble">Thinking…</div></div>}
+        {asking && <div className="message assistant thinking"><div className="bubble">Thinking…</div></div>}
+        <div ref={bottomRef} />
       </div>
 
       <form onSubmit={handleSubmit} className="chat-input">

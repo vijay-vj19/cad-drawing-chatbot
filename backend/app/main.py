@@ -1,11 +1,13 @@
 import shutil
 import uuid
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import chat, config, ingest
-from .models import ChatRequest, ChatResponse, UploadResponse
+from . import config
+from .index_mode import orchestrator
+from .models import AwaitingScopeResponse, ChatRequest, ChatResponse, ScopeChoice, UploadSummary
+from .query_mode.chat import answer_question
 
 app = FastAPI(title="Construction Drawing RAG Chatbot")
 
@@ -17,8 +19,8 @@ app.add_middleware(
 )
 
 
-@app.post("/upload", response_model=UploadResponse)
-async def upload(file: UploadFile = File(...)):
+@app.post("/upload")
+async def upload(file: UploadFile = File(...), perspective: str = Form("general contractor")):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=422, detail="Please upload a PDF file.")
 
@@ -28,13 +30,21 @@ async def upload(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
 
     try:
-        summary = ingest.ingest_pdf(doc_id, dest)
-    except ingest.GateRejected as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        result = orchestrator.start_ingest(doc_id, dest, perspective)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {e}")
 
-    return summary
+    return result
+
+
+@app.post("/upload/{doc_id}/scope")
+async def choose_scope(doc_id: str, choice: ScopeChoice):
+    try:
+        return orchestrator.resume_ingest(doc_id, choice.scope, choice.sheets)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="No pending upload awaiting a scope choice for this doc_id.")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {e}")
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -44,7 +54,7 @@ async def ask(req: ChatRequest):
         raise HTTPException(status_code=404, detail="Unknown doc_id -- upload a PDF first.")
 
     history = [m.model_dump() for m in req.history]
-    result = chat.answer_question(req.doc_id, req.question, history)
+    result = answer_question(req.doc_id, req.question, history)
     return result
 
 
