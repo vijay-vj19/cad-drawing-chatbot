@@ -31,12 +31,6 @@ TEXT_LAYER_MIN_CHARS_PER_PAGE = 200
 # For larger sets, present the options and wait." This is that threshold.
 SCOPE_GATE_SHEET_THRESHOLD = 25
 
-# process_drawing.py's own default (2576px) is tuned for Claude's native vision resolution --
-# we call OpenAI's vision API instead, which downscales close to this range server-side
-# anyway (no quality loss), so a smaller render meaningfully cuts memory/payload size on a
-# memory-constrained host with no accuracy cost.
-RENDER_LONG_EDGE_PX = int(os.environ.get("RENDER_LONG_EDGE_PX", "1600"))
-
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
